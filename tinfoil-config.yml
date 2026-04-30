@@ -5,6 +5,9 @@ memory: 8192
 containers:
   - name: env-echo
     image: python:3.11-alpine@sha256:8b5bfdb1fd2d78aa94e21c4d61be52487693f54be7f1021647751ff365795703
+    env:
+      - HARDCODED_VAR: "from-yaml"   # map-form, attested
+      - OPERATOR_FILLABLE             # string-form, slot fillable from --variable
     command:
       - python3
       - -c
