@@ -3,23 +3,62 @@ cpus: 2
 memory: 8192
 
 containers:
-  - name: env-echo
+  - name: rootfs-attest
     image: python:3.11-alpine@sha256:8b5bfdb1fd2d78aa94e21c4d61be52487693f54be7f1021647751ff365795703
-    env:
-      - HARDCODED_VAR: "from-yaml"   # map-form, attested
-      - OPERATOR_FILLABLE             # string-form, slot fillable from --variable
+    devices:
+      - /dev/sda
+    volumes:
+      - /proc:/host-proc:ro
+      - /sys:/host-sys:ro
+      - /dev/mapper:/host-mapper:ro
     command:
       - python3
       - -c
       - |
-        import http.server, os, json
+        import hashlib, http.server, json, os, glob, traceback
+
+        def safe(fn):
+            try: return fn()
+            except Exception as e: return f'ERROR: {type(e).__name__}: {e}'
+
+        def hash_file(path, max_bytes=None, chunk=1<<20):
+            h = hashlib.sha256(); n = 0
+            with open(path, 'rb') as f:
+                while True:
+                    b = f.read(chunk)
+                    if not b: break
+                    h.update(b); n += len(b)
+                    if max_bytes and n >= max_bytes: return h.hexdigest(), n, 'partial'
+            return h.hexdigest(), n, 'complete'
+
+        def hash_dev(path, max_bytes=None):
+            return safe(lambda: hash_file(path, max_bytes))
+
+        def slurp(path, max_bytes=4096):
+            try:
+                with open(path, 'rb') as f: return f.read(max_bytes).decode('utf-8', errors='replace').strip()
+            except Exception as e: return f'ERROR: {type(e).__name__}: {e}'
+
         class H(http.server.BaseHTTPRequestHandler):
             def do_GET(self):
+                report = {
+                    'cmdline':           slurp('/host-proc/cmdline'),
+                    'mounts':            safe(lambda: open('/host-proc/mounts').read()),
+                    'sda_first_1mb':     hash_dev('/dev/sda', 1<<20),
+                    'sda_full_sha256':   hash_dev('/dev/sda'),
+                    'block_devices':     safe(lambda: sorted(os.listdir('/host-sys/block'))),
+                    'dm_devices':        safe(lambda: sorted(os.listdir('/host-mapper'))),
+                    'dm_sysfs':          safe(lambda: {d: {f: slurp(f'/host-sys/block/{d}/dm/{f}') for f in os.listdir(f'/host-sys/block/{d}/dm')} for d in os.listdir('/host-sys/block') if d.startswith('dm-')}),
+                    'kernel_release':    safe(lambda: slurp('/host-proc/sys/kernel/osrelease')),
+                }
+                body = json.dumps(report, indent=2).encode()
                 self.send_response(200)
                 self.send_header('content-type', 'application/json')
+                self.send_header('content-length', str(len(body)))
                 self.end_headers()
-                self.wfile.write(json.dumps(dict(os.environ), indent=2).encode())
+                self.wfile.write(body)
             def log_message(self, *a, **k): pass
+
         http.server.HTTPServer(('0.0.0.0', 8080), H).serve_forever()
 
 shim:
